@@ -54,10 +54,16 @@ class SparkTSDBQuery(sMaster : String, zkQuorum : String, zkClientPort : String)
     config.set("hbase.mapreduce.inputtable", "tsdb")
     config.set("net.opentsdb.rowkey", bytes2hex(metric, "\\x"))
     if (tagkv != None) {
-      config.set("net.opentsdb.tagkv", bytes2hex(tagkv.get, "\\x"))      
+      config.set("net.opentsdb.tagkv", bytes2hex(tagkv.get, "\\x"))
     }
-    config.set("hbase.mapreduce.scan.timerange.start", (format_data.parse(if (startdate != None) startdate.get else "0101197001:00").getTime()).toString)
-    config.set("hbase.mapreduce.scan.timerange.end", (format_data.parse(if (enddate != None) enddate.get else "3112209923:59").getTime()).toString)
+    val stDateBuffer = ByteBuffer.allocate(4)
+    stDateBuffer.putInt( (format_data.parse(if (startdate != None) startdate.get else "0101197001:00").getTime() / 1000).toInt)
+    
+    val endDateBuffer = ByteBuffer.allocate(4)
+    endDateBuffer.putInt( (format_data.parse(if (enddate != None) enddate.get else "3112209923:59").getTime() / 1000).toInt)
+        
+    config.set("hbase.mapreduce.scan.timerange.start", bytes2hex(stDateBuffer.array(), "\\x"))
+    config.set("hbase.mapreduce.scan.timerange.end", bytes2hex(endDateBuffer.array(), "\\x"))
     config
   }
 
@@ -80,36 +86,18 @@ class SparkTSDBQuery(sMaster : String, zkQuorum : String, zkClientPort : String)
     rtn
   }
 
-  def generateRDD(metricName : String, tagKeyValueMap : String, startdate : String, enddate : String) = {
+  def generateRDD(metricName : String, tagKeyValueMap : String, startdate : String, enddate : String, sc : SparkContext) = {
     val metric = metricName
     var tags = if (tagKeyValueMap.trim != "*")
       tagKeyValueMap.split(",").map(_.split("->")).map(l => (l(0).trim, l(1).trim)).toMap
     else Map("dummyKey" -> "dummyValue")
-
     val columnQualifiers = Array("metrics", "tagk", "tagv")
-
-    //creating spark context
-    val sparkConf = new SparkConf()
-    sparkConf.setAppName("opentsdb-spark")
-    sparkConf.setMaster(sparkMaster)
-    if (!SparkContext.jarOfClass(this.getClass).isEmpty) {
-      //If we run from eclipse, this statement doesnt work!! Therefore the else part
-      sparkConf.setJars(SparkContext.jarOfClass(this.getClass).toSeq)
-    } else {
-      val jar = Jar
-      val classPath = this.getClass.getResource("/" + this.getClass.getName.replace('.', '/') + ".class").toString()
-      val sourceDir = classPath.substring("file:".length, classPath.indexOf("uis/cipsi/rdd/opentsdb")).toString()
-      jar.create(File("/tmp/opentsdb-spark-0.01.jar"), Directory(sourceDir), "TestQuery")
-      sparkConf.setJars(Seq("/tmp/opentsdb-spark-0.01.jar"))
-    }
-
-    val sc = new SparkContext(sparkConf)
 
     val tsdbUID = sc.newAPIHadoopRDD(tsdbuidConfig(zookeeperQuorum, zookeeperClientPort,
       Array(metric, tags.map(_._1).mkString("|"), tags.map(_._2).mkString("|"))),
-      classOf[ uis.cipsi.rdd.opentsdb.TSDBInputFormat ],
-      classOf[ org.apache.hadoop.hbase.io.ImmutableBytesWritable ],
-      classOf[ org.apache.hadoop.hbase.client.Result ])
+      classOf[ TSDBInputFormat ],
+      classOf[ ImmutableBytesWritable ],
+      classOf[ Result ])
 
     val metricsUID = tsdbUID.map(l =>
       l._2.getValue("id".getBytes(), columnQualifiers(0).getBytes())).filter(_ != null).collect //Since we will have only one metric uid
@@ -119,57 +107,59 @@ class SparkTSDBQuery(sMaster : String, zkQuorum : String, zkClientPort : String)
     val tagVKeys = tagVUIDs.keys.toArray
     //If certain user supplied tags were not present 
     tags = tags.filter(kv => tagKKeys.contains(kv._1) && tagVKeys.contains(kv._2))
-    
-    val tagKV = tagKUIDs.filter(kv => tags.contains(kv._1)).map(k => (k._2, tagVUIDs(tags(k._1)))).map(l => (l._1 ++ l._2)) .toList.sorted(Ordering.by((_: Array[Byte]).toIterable))  	    
+
+    val tagKV = tagKUIDs.filter(kv => tags.contains(kv._1)).map(k => (k._2, tagVUIDs(tags(k._1)))).map(l => (l._1 ++ l._2)).toList.sorted(Ordering.by((_ : Array[ Byte ]).toIterable))
 
     if (metricsUID.length == 0) {
       println("Not Found: " + (if (metricsUID.length == 0) "Metric:" + metricName))
       System.exit(1)
     }
-    
+
     val tsdb = sc.newAPIHadoopRDD(tsdbConfig(zookeeperQuorum, zookeeperClientPort, metricsUID.last,
       if (tagKV.size != 0) Option(tagKV.flatten.toArray) else None,
       if (startdate != "*") Option(startdate) else None, if (enddate != "*") Option(enddate) else None),
       classOf[ uis.cipsi.rdd.opentsdb.TSDBInputFormat ],
       classOf[ org.apache.hadoop.hbase.io.ImmutableBytesWritable ],
       classOf[ org.apache.hadoop.hbase.client.Result ])
-      
-      tsdb.map(kv => (ByteBuffer.wrap(Arrays.copyOfRange(kv._1.copyBytes(), 3, 7) ).getInt))
+
     //Decoding retrieved data into RDD
     tsdb.map(kv => (Arrays.copyOfRange(kv._1.copyBytes(), 3, 7),
       kv._2.getFamilyMap("t".getBytes())))
-      .map({                
+      .map({
         kv =>
           val basetime : Int = ByteBuffer.wrap(kv._1).getInt
-          
-          var colVal = new ArrayBuffer[ (Int, Int) ]()
           val iterator = kv._2.entrySet().iterator()
-          
-          while (iterator.hasNext()) {            
+          val row = new ArrayBuffer[ (Int, Float) ]
+          while (iterator.hasNext()) {
             val next = iterator.next()
-            colVal += (({              
-              val a = next.getKey();
-              var key : Int = 0;
-              for (i <- 0 until a.length) {
-                val bo = (a(i) & 0XFF) << ((a.length * 8 - 8) - (i * 8)); 
-                key = key | bo
+            val a = next.getKey();
+            var key : Int = 0;
+            for (i <- 0 until a.length) {
+              val bo = (a(i) & 0XFF) << ((a.length * 8 - 8) - (i * 8));
+              key = key | bo
+            };
+            //Column Quantifiers(delta) are stored as follows:
+            //if number of bytes=2: 12bit value + 4 bit flag
+            //if number of bytes=4: first 4bytes flag + next 22 bytes value + last 6 bytes flag
+            //Here we perform bitwise operation to achive the same
+            val delta = if (a.length == 2) key >> 4 else (key << 4) >> 6
+
+            val b = next.getValue();
+            var value : Float = 0
+            var vInt : Int = 0
+            if (b.length == 1) {
+              for (i <- 0 until b.length) {
+                val bo = (b(i) & 0XFF) << ((b.length * 8 - 8) - (i * 8));
+                vInt = vInt | bo
               };
-              //Column Quantifiers(delta) are stored as follows:
-              //if number of bytes=2: 12bit value + 4 bit flag
-              //if number of bytes=4: first 4bytes flag + next 22 bytes value + last 6 bytes flag
-              //Here we perform bitwise operation to achive the same
-              (if (a.length == 2) key >> 4 else (key << 4) >> 6)
-            }, {
-              var value : Int = 0;
-              val a = next.getValue();
-              for (i <- 0 until a.length) {
-                val bo = (a(i) & 0XFF) << ((a.length * 8 - 8) - (i * 8)); 
-                value = value | bo
-              }; value
-            }))
+              value = vInt
+            } else {
+              value = ByteBuffer.wrap(b).getFloat()
+            }
+            row += ((basetime + delta, value))
           }
-          (basetime, colVal)
-      }).map(kv => kv._2.map(cv=> (kv._1 + cv._1, cv._2) ))
-      
+          row match { case ArrayBuffer((k, v)) => (k, v) }
+      })
+
   }
 }

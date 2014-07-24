@@ -54,6 +54,17 @@ public class TSDBInputFormat extends TableInputFormat implements Configurable {
 	public Configuration getConf() {
 		return conf;
 	}
+	
+	public static byte[] hexStringToByteArray(String s) {
+		s = s.replace("\\x", "");
+		byte[] b = new byte[s.length() / 2];
+	    for (int i = 0; i < b.length; i++) {
+	      int index = i * 2;
+	      int v = Integer.parseInt(s.substring(index, index + 2), 16);
+	      b[i] = (byte) v;
+	    }
+	    return b;
+	}
 
 	/**
 	 * Specific configuration for the OPENTSDB tables {tsdb, tsdb-uid}
@@ -108,9 +119,12 @@ public class TSDBInputFormat extends TableInputFormat implements Configurable {
 				// is not provided then all data are extracted
 				if (conf.get(SCAN_TIMERANGE_START) != null
 						&& conf.get(SCAN_TIMERANGE_END) != null) {
-					scan.setTimeRange(
-							Long.parseLong(conf.get(SCAN_TIMERANGE_START)),
-							Long.parseLong(conf.get(SCAN_TIMERANGE_END)));
+					
+//					System.out.println( (conf.get(METRICS) + conf.get(SCAN_TIMERANGE_START) + conf.get(TAGKV)) );
+//					System.out.println((hexStringToByteArray(conf.get(METRICS) + conf.get(SCAN_TIMERANGE_START) + conf.get(TAGKV))).length);
+					scan.setStartRow( hexStringToByteArray(conf.get(METRICS) + conf.get(SCAN_TIMERANGE_START) + conf.get(TAGKV)) );
+					scan.setStopRow( hexStringToByteArray(conf.get(METRICS) + conf.get(SCAN_TIMERANGE_END) + conf.get(TAGKV)) );
+
 				}
 			}
 			// false by default, full table scans generate too much BC churn
