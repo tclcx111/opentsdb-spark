@@ -15,16 +15,15 @@ Module for accessing OpenTSDB data through Spark.
 ##On your cluster.
   >For each node in the cluster add the following into your com file
   1. nano 
-  2. copy the following to the end of the file. Before echo "$CLASSPATH"
-      #export HBASE_HOME=/path/to/your/hbase/dir (if you haven't already defined the $HBASE_HOME env var)
+  2. copy the following to the end of the file. Before echo "$CLASSPATH"\\
+      export HBASE_HOME=/path/to/your/hbase/dir (if you haven't already defined the $HBASE_HOME env var)
+
       for f in $HBASE_HOME/lib/*.jar
         do
     	CLASSPATH="$CLASSPATH:$f"
       done
+
 #System Info
-  Apache Hadoop 2.2.0
-  Apache Hbase 0.98.3-hadoop2
-  Apache Spark 1.0.1
-  Scala 2.10.4
+  Apache Hadoop 2.2.0, Apache Hbase 0.98.3-hadoop2, Apache Spark 1.0.1, Scala 2.10.4
 
 
