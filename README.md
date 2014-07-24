@@ -14,7 +14,7 @@ Module for accessing OpenTSDB data through Spark.
 
 ##On your cluster.
   >For each node in the cluster add the following into your com file
-  1. nano 
+  1. nano /path/to/your/spark/dir/bin/compute-classpath.sh
   2. copy the following to the end of the file. Before echo "$CLASSPATH"\\
       export HBASE_HOME=/path/to/your/hbase/dir (if you haven't already defined the $HBASE_HOME env var)
 
